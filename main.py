@@ -220,6 +220,14 @@ def send_email_report(summary: str, tweets: list) -> bool:
         # Configure Resend with credentials from .env
         resend.api_key = os.getenv("SENDER_API_KEY")
         
+        # Get email addresses
+        from_email = os.getenv("FROM_EMAIL")
+        to_email = os.getenv("TO_EMAIL")
+        
+        if not from_email or not to_email:
+            print("❌ Email addresses not configured")
+            return False
+        
         # Format the email content with HTML
         html_content = format_email_html(summary)
         
@@ -235,8 +243,8 @@ Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         
         # Send email using Resend with both HTML and plain text
         response = resend.Emails.send({
-            "from": os.getenv("EMAIL_SENDER"),
-            "to": os.getenv("EMAIL_RECIPIENT"),
+            "from": from_email,
+            "to": to_email,
             "subject": "Daily w3.wave Macro Update",
             "html": html_content,
             "text": plain_text
