@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  supabase:
+    image: supabase/supabase:latest
+    container_name: supabase
+    ports:
+      - "5432:5432"
+      - "54321:54321"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-jwt-token-with-at-least-32-characters-long}
+      ANON_KEY: ${ANON_KEY:-your-anon-key}
+      SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY:-your-service-role-key}
+    volumes:
+      - ./supabase:/supabase
+    restart: unless-stopped 
