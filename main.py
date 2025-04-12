@@ -7,6 +7,7 @@ from sources.twitter import fetch_today_tweets
 import resend
 from openai import OpenAI
 import re
+import tweepy
 
 # ------------------🔧 Helper Functions ------------------
 
@@ -314,6 +315,7 @@ def main():
     ]
     
     print("🧠 Starting daily tweet analysis...")
+    print(f"📊 Will monitor {len(users)} Twitter handles")
     
     # Step 1: Fetch new tweets from Twitter and save to database
     print("\n📥 Fetching new tweets from Twitter...")
@@ -322,15 +324,21 @@ def main():
     if new_tweets:
         print(f"📥 Found {len(new_tweets)} new tweets to save")
         for tweet in new_tweets:
+            print(f"\n💾 Attempting to save tweet from @{tweet['author']}:")
+            print(f"📝 Content: {tweet['content'][:100]}...")
             saved_data = save_tweet_to_supabase(supabase, tweet)
             if saved_data:
+                print(f"✅ Successfully saved tweet from @{tweet['author']}")
                 tweet['saved_data'] = saved_data
+            else:
+                print(f"❌ Failed to save tweet from @{tweet['author']}")
     else:
         print("📥 No new tweets found on Twitter today")
     
     # Step 2: Get today's non-summarized tweets from database
     print("\n🔍 Checking database for non-summarized tweets...")
     today = datetime.now(timezone.utc).date()
+    print(f"📅 Looking for tweets from: {today.isoformat()}")
     tweets_to_process = supabase.get_tweets_by_date(today)
     
     if not tweets_to_process:
@@ -359,8 +367,9 @@ def main():
         # Try to get the ID from the saved tweet data
         if 'saved_data' in tweet and tweet['saved_data'] and 'id' in tweet['saved_data']:
             tweet_ids.append(tweet['saved_data']['id'])
+            print(f"✅ Found ID for tweet from @{tweet['author']}: {tweet['saved_data']['id']}")
         else:
-            print(f"⚠️ Warning: Could not find ID for tweet from {tweet['author']}")
+            print(f"⚠️ Warning: Could not find ID for tweet from @{tweet['author']}")
     
     report_data = {
         "summary": summary,
@@ -402,11 +411,47 @@ def generate_and_send_report():
     # Initialize clients
     supabase = SupabaseClient()
     
-    print("🧠 Starting daily report generation...")
+    # Configure users to monitor
+    users = [
+        "qthomp",
+        "RaoulGMI",
+        "fejau_inc",
+        "DariusDale42",
+        "CavanXy",
+        "Citrini7",
+        "FedGuy12",
+        "fundstrat",
+        "dgt10011",
+        "Bluntz_Capital",
+        "AriDavidPaul",
+        "cburniske"
+    ]
     
-    # Get today's non-summarized tweets from database
+    print("🧠 Starting daily report generation...")
+    print(f"📊 Will monitor {len(users)} Twitter handles")
+    
+    # Step 1: Fetch new tweets from Twitter and save to database
+    print("\n📥 Fetching new tweets from Twitter...")
+    new_tweets = fetch_today_tweets(users)
+    
+    if new_tweets:
+        print(f"📥 Found {len(new_tweets)} new tweets to save")
+        for tweet in new_tweets:
+            print(f"\n💾 Attempting to save tweet from @{tweet['author']}:")
+            print(f"📝 Content: {tweet['content'][:100]}...")
+            saved_data = save_tweet_to_supabase(supabase, tweet)
+            if saved_data:
+                print(f"✅ Successfully saved tweet from @{tweet['author']}")
+                tweet['saved_data'] = saved_data
+            else:
+                print(f"❌ Failed to save tweet from @{tweet['author']}")
+    else:
+        print("📥 No new tweets found on Twitter today")
+    
+    # Step 2: Get today's non-summarized tweets from database
     print("\n🔍 Checking database for non-summarized tweets...")
     today = datetime.now(timezone.utc).date()
+    print(f"📅 Looking for tweets from: {today.isoformat()}")
     tweets_to_process = supabase.get_tweets_by_date(today)
     
     if not tweets_to_process:
@@ -415,7 +460,7 @@ def generate_and_send_report():
     
     print(f"📊 Found {len(tweets_to_process)} tweets to analyze")
     
-    # Filter and sort tweets by engagement
+    # Step 3: Filter and sort tweets by engagement
     print("\n📊 Filtering and sorting tweets by engagement...")
     tweets_to_process = filter_and_sort_tweets(tweets_to_process)
     
@@ -423,13 +468,22 @@ def generate_and_send_report():
         print("✅ No high-engagement tweets to analyze today.")
         return
     
-    # Generate AI summary
+    # Step 4: Generate AI summary
     print("\n🤖 Generating AI summary...")
     summary = generate_ai_summary(tweets_to_process)
     
-    # Store AI report in database
+    # Step 5: Store AI report in database
     print("\n💾 Storing AI report in database...")
-    tweet_ids = [tweet['id'] for tweet in tweets_to_process]
+    # Get the Supabase IDs of the tweets we just saved
+    tweet_ids = []
+    for tweet in tweets_to_process:
+        # Try to get the ID from the saved tweet data
+        if 'saved_data' in tweet and tweet['saved_data'] and 'id' in tweet['saved_data']:
+            tweet_ids.append(tweet['saved_data']['id'])
+            print(f"✅ Found ID for tweet from @{tweet['author']}: {tweet['saved_data']['id']}")
+        else:
+            print(f"⚠️ Warning: Could not find ID for tweet from @{tweet['author']}")
+    
     report_data = {
         "summary": summary,
         "tweet_ids": tweet_ids,
@@ -443,10 +497,11 @@ def generate_and_send_report():
         print("❌ Failed to store AI report")
         return
     
-    # Send email report
+    # Step 6: Send email report
     print("\n📧 Sending email report...")
     if send_email_report(summary, tweets_to_process):
-        # Mark tweets as summarized after successful email delivery
+        # Step 7: Mark tweets as summarized after successful email delivery
+        tweet_ids = [tweet['id'] for tweet in tweets_to_process]
         if supabase.mark_tweets_as_summarized(tweet_ids):
             print(f"✅ Successfully marked {len(tweet_ids)} tweets as summarized")
             
@@ -494,8 +549,72 @@ def reset_today_summarized_status():
         print(f"❌ Error resetting summarized status: {e}")
         return False
 
+def test_twitter_api():
+    """Test Twitter API connection and tweet fetching."""
+    print("\n🔍 Testing Twitter API connection...")
+    
+    # Load environment variables
+    load_dotenv()
+    
+    # Initialize Twitter client
+    BEARER_TOKEN = os.getenv('TWITTER_BEARER_TOKEN')
+    if not BEARER_TOKEN:
+        print("❌ Twitter Bearer Token not found in environment variables")
+        return False
+    
+    print(f"🔑 Twitter Bearer Token: {BEARER_TOKEN[:10]}...{BEARER_TOKEN[-10:]}")
+    
+    try:
+        client = tweepy.Client(bearer_token=BEARER_TOKEN)
+        print("✅ Twitter client initialized successfully")
+        
+        # Test with one user
+        test_user = "qthomp"
+        print(f"\n🔍 Testing tweet fetch for @{test_user}...")
+        
+        # Get user ID
+        user = client.get_user(username=test_user)
+        if not user.data:
+            print(f"❌ Could not find user @{test_user}")
+            return False
+        
+        print(f"✅ Found user ID: {user.data.id}")
+        
+        # Calculate time range (last 24 hours)
+        now = datetime.now(timezone.utc)
+        start_time = now - timedelta(hours=24)
+        start_time_str = start_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+        
+        print(f"📅 Fetching tweets since: {start_time_str}")
+        
+        # Fetch tweets
+        tweets = client.get_users_tweets(
+            id=user.data.id,
+            start_time=start_time_str,
+            tweet_fields=["created_at", "id", "text", "referenced_tweets", "public_metrics"],
+            expansions=["referenced_tweets.id"],
+            max_results=10
+        )
+        
+        if not tweets.data:
+            print(f"ℹ️ No tweets found for @{test_user} in the last 24 hours")
+        else:
+            print(f"✅ Found {len(tweets.data)} tweets for @{test_user}")
+            for tweet in tweets.data:
+                print(f"\n📝 Tweet: {tweet.text[:100]}...")
+                print(f"⏰ Created at: {tweet.created_at}")
+                print(f"📊 Engagement: {tweet.public_metrics}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error testing Twitter API: {str(e)}")
+        return False
+
 if __name__ == "__main__":
-    # First reset the summarized status
-    if reset_today_summarized_status():
-        # Then generate and send the report
+    # First test the Twitter API
+    if test_twitter_api():
+        # If API test passes, run the main report generation
         generate_and_send_report()
+    else:
+        print("❌ Twitter API test failed. Please check your configuration.")

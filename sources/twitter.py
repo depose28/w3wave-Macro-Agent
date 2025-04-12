@@ -43,36 +43,35 @@ def fetch_tweets_for_user(client, username):
     
     while retry_count < max_retries:
         try:
-            print(f"Fetching tweets for user: {username} (Attempt {retry_count + 1}/{max_retries})")
+            print(f"\n🔍 Fetching tweets for user: {username} (Attempt {retry_count + 1}/{max_retries})")
             
             # Add increasing delay between requests
             delay = base_delay * (retry_count + 1)
-            print(f"Waiting {delay} seconds before request...")
+            print(f"⏳ Waiting {delay} seconds before request...")
             time.sleep(delay)
             
             # Get user ID from username
+            print(f"🔑 Looking up user ID for @{username}...")
             user = client.get_user(username=username)
             if not user.data:
-                print(f"User {username} not found")
+                print(f"❌ User @{username} not found")
                 return []
             
-            print(f"Found user ID: {user.data.id}")
+            print(f"✅ Found user ID: {user.data.id}")
             
-            # Calculate today's midnight in CET
-            cet_tz = timezone(timedelta(hours=1))  # CET is UTC+1
-            now = datetime.now(cet_tz)
-            start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            # Convert to UTC for Twitter API
-            start_time_utc = start_time.astimezone(timezone.utc)
-            # Format in RFC3339
-            start_time_str = start_time_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
+            # Calculate time range (last 24 hours)
+            now = datetime.now(timezone.utc)
+            start_time = now - timedelta(hours=24)
+            start_time_str = start_time.strftime('%Y-%m-%dT%H:%M:%SZ')
             
-            print(f"Fetching tweets since: {start_time_str} (CET midnight)")
+            print(f"📅 Fetching tweets since: {start_time_str}")
+            print(f"⏰ Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}")
             
             # Add delay between requests
             time.sleep(base_delay)
             
             # Fetch user's tweets using their ID
+            print(f"📥 Fetching tweets for user ID {user.data.id}...")
             tweets = client.get_users_tweets(
                 id=user.data.id,
                 start_time=start_time_str,
@@ -82,10 +81,10 @@ def fetch_tweets_for_user(client, username):
             )
             
             if not tweets.data:
-                print(f"No tweets found for {username}")
+                print(f"ℹ️ No tweets found for @{username} in the last 24 hours")
                 return []
             
-            print(f"Found {len(tweets.data)} tweets for {username}")
+            print(f"✅ Found {len(tweets.data)} tweets for @{username}")
             # Format tweets
             formatted_tweets = []
             for tweet in tweets.data:
@@ -121,21 +120,21 @@ def fetch_tweets_for_user(client, username):
                     "reply_count": metrics.get('reply_count', 0),
                     "quote_count": metrics.get('quote_count', 0)
                 })
-                print(f"Processed tweet: {tweet.id} (Retweet: {is_retweet})")
-                print(f"Engagement: {metrics.get('like_count', 0)} likes, {metrics.get('retweet_count', 0)} retweets")
+                print(f"📝 Processed tweet: {tweet.id} (Retweet: {is_retweet})")
+                print(f"📊 Engagement: {metrics.get('like_count', 0)} likes, {metrics.get('retweet_count', 0)} retweets")
             
             return formatted_tweets
             
         except tweepy.TooManyRequests:
-            print(f"Rate limit hit on attempt {retry_count + 1}")
+            print(f"⚠️ Rate limit hit on attempt {retry_count + 1}")
             if retry_count < max_retries - 1:
                 handle_rate_limit(retry_count + 1)
                 retry_count += 1
             else:
-                print(f"Failed to fetch tweets for {username} after {max_retries} attempts")
+                print(f"❌ Failed to fetch tweets for @{username} after {max_retries} attempts")
                 return []
         except Exception as e:
-            print(f"Error fetching tweets for {username}: {str(e)}")
+            print(f"❌ Error fetching tweets for @{username}: {str(e)}")
             retry_count += 1
             if retry_count < max_retries:
                 time.sleep(base_delay * retry_count)  # Exponential backoff for other errors
