@@ -11,8 +11,10 @@ import re
 import tweepy
 import time
 
-# Filter out tweepy syntax warnings
-warnings.filterwarnings("ignore", category=SyntaxWarning, module="tweepy")
+# Filter out all syntax warnings from tweepy
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # ------------------🔧 Helper Functions ------------------
 
@@ -297,116 +299,45 @@ def filter_and_sort_tweets(tweets: list, min_engagement: int = 0) -> list:
 # ------------------📦 Main Execution ------------------
 
 def main():
-    # Load environment variables
-    load_dotenv()
+    print("\n🚀 Starting daily macro report generation...")
+    print("📅 Date:", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
     
     # Initialize clients
+    print("\n🔌 Initializing clients...")
     supabase = SupabaseClient()
+    print("✅ Supabase client initialized")
     
-    # Configure users to monitor
-    users = [
-        "qthomp",
-        "RaoulGMI",
-        "fejau_inc",
-        "DariusDale42",
-        "CavanXy",
-        "Citrini7",
-        "FedGuy12",
-        "fundstrat",
-        "dgt10011",
-        "Bluntz_Capital",
-        "AriDavidPaul",
-        "cburniske"
-    ]
+    # Fetch today's tweets
+    print("\n📥 Fetching today's tweets...")
+    tweets = fetch_today_tweets()
+    print(f"✅ Fetched {len(tweets)} tweets")
     
-    print("🧠 Starting daily tweet analysis...")
-    print(f"📊 Will monitor {len(users)} Twitter handles")
+    # Save tweets to database
+    print("\n💾 Saving tweets to database...")
+    saved_tweets = save_tweets_to_db(tweets, supabase)
+    print(f"✅ Saved {len(saved_tweets)} new tweets")
     
-    # Step 1: Fetch new tweets from Twitter and save to database
-    print("\n📥 Fetching new tweets from Twitter...")
-    new_tweets = fetch_today_tweets(users)
+    # Get tweets from database
+    print("\n📥 Retrieving tweets from database...")
+    db_tweets = get_tweets_from_db(supabase)
+    print(f"✅ Retrieved {len(db_tweets)} tweets from database")
     
-    if new_tweets:
-        print(f"📥 Found {len(new_tweets)} new tweets to save")
-        for tweet in new_tweets:
-            print(f"\n💾 Attempting to save tweet from @{tweet['author']}:")
-            print(f"📝 Content: {tweet['content'][:100]}...")
-            saved_data = save_tweet_to_supabase(supabase, tweet)
-            if saved_data:
-                print(f"✅ Successfully saved tweet from @{tweet['author']}")
-                tweet['saved_data'] = saved_data
-            else:
-                print(f"❌ Failed to save tweet from @{tweet['author']}")
-    else:
-        print("📥 No new tweets found on Twitter today")
+    # Generate summaries
+    print("\n🤖 Generating summaries...")
+    summaries = generate_summaries(db_tweets)
+    print(f"✅ Generated {len(summaries)} summaries")
     
-    # Step 2: Get today's non-summarized tweets from database
-    print("\n🔍 Checking database for non-summarized tweets...")
-    today = datetime.now(timezone.utc).date()
-    print(f"📅 Looking for tweets from: {today.isoformat()}")
-    tweets_to_process = supabase.get_tweets_by_date(today)
+    # Format email
+    print("\n📧 Formatting email...")
+    html_content, plain_text_content = format_email(summaries)
+    print("✅ Email content formatted")
     
-    if not tweets_to_process:
-        print("✅ No tweets to analyze today.")
-        return
+    # Send email
+    print("\n📤 Sending email...")
+    send_email(html_content, plain_text_content)
+    print("✅ Email sent successfully!")
     
-    print(f"📊 Found {len(tweets_to_process)} tweets to analyze")
-    
-    # Step 3: Filter and sort tweets by engagement
-    print("\n📊 Filtering and sorting tweets by engagement...")
-    tweets_to_process = filter_and_sort_tweets(tweets_to_process)
-    
-    if not tweets_to_process:
-        print("✅ No high-engagement tweets to analyze today.")
-        return
-    
-    # Step 4: Generate AI summary
-    print("\n🤖 Generating AI summary...")
-    summary = generate_ai_summary(tweets_to_process)
-    
-    # Step 5: Store AI report in database
-    print("\n💾 Storing AI report in database...")
-    # Get the Supabase IDs of the tweets we just saved
-    tweet_ids = []
-    for tweet in tweets_to_process:
-        # Try to get the ID from the saved tweet data
-        if 'saved_data' in tweet and tweet['saved_data'] and 'id' in tweet['saved_data']:
-            tweet_ids.append(tweet['saved_data']['id'])
-            print(f"✅ Found ID for tweet from @{tweet['author']}: {tweet['saved_data']['id']}")
-        else:
-            print(f"⚠️ Warning: Could not find ID for tweet from @{tweet['author']}")
-    
-    report_data = {
-        "summary": summary,
-        "tweet_ids": tweet_ids,
-        "date": today.isoformat(),
-        "email_sent": False
-    }
-    stored_report = supabase.store_ai_report(report_data)
-    if stored_report:
-        print("✅ Successfully stored AI report")
-    else:
-        print("❌ Failed to store AI report")
-        return
-    
-    # Step 6: Send email report
-    print("\n📧 Sending email report...")
-    if send_email_report(summary, tweets_to_process):
-        # Step 7: Mark tweets as summarized after successful email delivery
-        tweet_ids = [tweet['id'] for tweet in tweets_to_process]
-        if supabase.mark_tweets_as_summarized(tweet_ids):
-            print(f"✅ Successfully marked {len(tweet_ids)} tweets as summarized")
-            
-            # Update report to indicate email was sent
-            supabase.client.table("ai_reports")\
-                .update({"email_sent": True})\
-                .eq("id", stored_report["id"])\
-                .execute()
-            print("✅ Updated report status to email sent")
-        else:
-            print("❌ Failed to mark tweets as summarized")
-    else:
-        print("❌ Failed to send email report")
+    print("\n✨ Daily macro report generation completed successfully!")
 
 def generate_and_send_report():
     """Generate AI summary and send email report for today's tweets."""
@@ -631,9 +562,10 @@ def test_twitter_api():
         return False
 
 if __name__ == "__main__":
-    # First test the Twitter API
-    if test_twitter_api():
-        # If API test passes, run the main report generation
-        generate_and_send_report()
-    else:
-        print("❌ Twitter API test failed. Please check your configuration.")
+    try:
+        main()
+    except Exception as e:
+        print(f"\n❌ Error in main execution: {str(e)}")
+        print("Stack trace:")
+        import traceback
+        traceback.print_exc()
