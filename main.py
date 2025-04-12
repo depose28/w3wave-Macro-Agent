@@ -307,9 +307,25 @@ def main():
     supabase = SupabaseClient()
     print("✅ Supabase client initialized")
     
+    # Define Twitter usernames to monitor
+    twitter_usernames = [
+        "qthomp",
+        "RaoulGMI",
+        "fejau_inc",
+        "DariusDale42",
+        "CavanXy",
+        "Citrini7",
+        "FedGuy12",
+        "fundstrat",
+        "dgt10011",
+        "Bluntz_Capital",
+        "AriDavidPaul",
+        "cburniske"
+    ]
+    
     # Fetch today's tweets
     print("\n📥 Fetching today's tweets...")
-    tweets = fetch_today_tweets()
+    tweets = fetch_today_tweets(twitter_usernames)
     print(f"✅ Fetched {len(tweets)} tweets")
     
     # Save tweets to database
