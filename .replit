@@ -5,6 +5,14 @@ entrypoint = "main.py"
 [nix]
 channel = "stable-22_11"
 
+[deployment]
+run = ["python", "main.py"]
+deploymentTarget = "cloudrun"
+
+[deployment.schedule]
+type = "cron"
+cron = "0 12 * * *"  # Run at 12:00 UTC every day
+
 [env]
 PYTHONPATH = "${PYTHONPATH}:${REPL_SLUG}"
 
