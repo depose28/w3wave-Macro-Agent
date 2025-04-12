@@ -1,5 +1,6 @@
 import os
 import json
+import warnings
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from supabase_client import SupabaseClient
@@ -8,6 +9,9 @@ import resend
 from openai import OpenAI
 import re
 import tweepy
+
+# Filter out tweepy syntax warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning, module="tweepy")
 
 # ------------------🔧 Helper Functions ------------------
 
