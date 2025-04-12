@@ -9,6 +9,7 @@ import resend
 from openai import OpenAI
 import re
 import tweepy
+import time
 
 # Filter out tweepy syntax warnings
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="tweepy")
@@ -436,20 +437,34 @@ def generate_and_send_report():
     
     # Step 1: Fetch new tweets from Twitter and save to database
     print("\n📥 Fetching new tweets from Twitter...")
-    new_tweets = fetch_today_tweets(users)
+    all_tweets = []
     
-    if new_tweets:
-        print(f"📥 Found {len(new_tweets)} new tweets to save")
-        for tweet in new_tweets:
-            print(f"\n💾 Attempting to save tweet from @{tweet['author']}:")
-            print(f"📝 Content: {tweet['content'][:100]}...")
-            saved_data = save_tweet_to_supabase(supabase, tweet)
-            if saved_data:
-                print(f"✅ Successfully saved tweet from @{tweet['author']}")
-                tweet['saved_data'] = saved_data
-            else:
-                print(f"❌ Failed to save tweet from @{tweet['author']}")
-    else:
+    for i, username in enumerate(users):
+        print(f"\n🔍 Processing user {i+1}/{len(users)}: @{username}")
+        new_tweets = fetch_today_tweets([username])  # Process one user at a time
+        
+        if new_tweets:
+            print(f"📥 Found {len(new_tweets)} new tweets to save")
+            for tweet in new_tweets:
+                print(f"\n💾 Attempting to save tweet from @{tweet['author']}:")
+                print(f"📝 Content: {tweet['content'][:100]}...")
+                saved_data = save_tweet_to_supabase(supabase, tweet)
+                if saved_data:
+                    print(f"✅ Successfully saved tweet from @{tweet['author']}")
+                    tweet['saved_data'] = saved_data
+                    all_tweets.append(tweet)
+                else:
+                    print(f"❌ Failed to save tweet from @{tweet['author']}")
+        else:
+            print(f"📥 No new tweets found for @{username}")
+        
+        # Add delay between users to avoid rate limits
+        if i < len(users) - 1:  # Don't delay after the last user
+            delay = 30  # 30 seconds between users
+            print(f"\n⏳ Waiting {delay} seconds before processing next user...")
+            time.sleep(delay)
+    
+    if not all_tweets:
         print("📥 No new tweets found on Twitter today")
     
     # Step 2: Get today's non-summarized tweets from database

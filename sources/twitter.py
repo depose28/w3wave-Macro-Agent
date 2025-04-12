@@ -125,10 +125,18 @@ def fetch_tweets_for_user(client, username):
             
             return formatted_tweets
             
-        except tweepy.TooManyRequests:
+        except tweepy.TooManyRequests as e:
             print(f"⚠️ Rate limit hit on attempt {retry_count + 1}")
+            print(f"⚠️ Rate limit error: {str(e)}")
+            
+            # Try to get rate limit info from the error
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"⚠️ Rate limit headers: {e.response.headers}")
+            
             if retry_count < max_retries - 1:
-                handle_rate_limit(retry_count + 1)
+                wait_time = min(900 * (1.5 ** retry_count), 3600)  # Max 1 hour wait
+                print(f"⏳ Waiting {wait_time/60:.1f} minutes before retry...")
+                time.sleep(wait_time)
                 retry_count += 1
             else:
                 print(f"❌ Failed to fetch tweets for @{username} after {max_retries} attempts")
