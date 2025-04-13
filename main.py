@@ -330,7 +330,11 @@ def main():
     
     # Save tweets to database
     print("\n💾 Saving tweets to database...")
-    saved_tweets = save_tweets_to_db(tweets, supabase)
+    saved_tweets = []
+    for tweet in tweets:
+        result = save_tweet_to_supabase(supabase, tweet)
+        if result:
+            saved_tweets.append(result)
     print(f"✅ Saved {len(saved_tweets)} new tweets")
     
     # Get tweets from database
