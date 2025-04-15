@@ -12,7 +12,7 @@ import tweepy
 import time
 import asyncio
 import sys
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import openai
 
 # Filter out all syntax warnings from tweepy
@@ -43,44 +43,45 @@ def save_seen_tweets(cache):
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
 
-async def save_tweet_to_supabase(tweet: Dict) -> None:
-    """Save a tweet to Supabase."""
+async def save_tweet_to_supabase(tweet: Dict) -> Optional[Dict]:
+    """Save a tweet to the Supabase database."""
     try:
-        # Flatten public metrics into individual columns
-        tweet_data = {
-            "content": tweet["content"],
-            "author": tweet["author"],
-            "timestamp": tweet["timestamp"],
-            "tweet_url": tweet["tweet_url"],
-            "company": tweet["company"],
-            "like_count": tweet["public_metrics"].get("like_count", 0),
-            "retweet_count": tweet["public_metrics"].get("retweet_count", 0),
-            "reply_count": tweet["public_metrics"].get("reply_count", 0),
-            "quote_count": tweet["public_metrics"].get("quote_count", 0)
-        }
-        
         # Check if tweet already exists
-        existing_tweet = supabase.client.table("messages")\
-            .select("id")\
-            .eq("tweet_url", tweet_data["tweet_url"])\
-            .execute()
-            
-        if existing_tweet.data:
-            print(f"⏭️ Tweet from @{tweet['author']} already exists, skipping...")
-            return
-            
-        # Insert new tweet
-        result = supabase.client.table("messages")\
-            .insert(tweet_data)\
-            .execute()
-            
-        if result.data:
-            print(f"✅ Successfully saved tweet from @{tweet['author']}")
+        if supabase.is_tweet_exists(tweet["author"], tweet["content"]):
+            print(f"⏭️ Tweet from {tweet['author']} already exists, skipping...")
+            return None
+
+        # Extract metrics from the tweet data
+        metrics = tweet.get('public_metrics', {})
+        
+        # Prepare the data to insert with all required fields
+        insert_data = {
+            "content": tweet.get("content", ""),
+            "author": tweet.get("author", ""),
+            "timestamp": tweet.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            "tweet_url": tweet.get("tweet_url", ""),
+            "like_count": metrics.get('like_count', 0),
+            "retweet_count": metrics.get('retweet_count', 0),
+            "reply_count": metrics.get('reply_count', 0),
+            "quote_count": metrics.get('quote_count', 0),
+            "summarized": False,
+            "is_retweet": False,
+            "topic": "macro",
+            "private": False
+        }
+
+        # Save tweet to database
+        response = supabase.client.table("messages").insert(insert_data).execute()
+        
+        if response.data:
+            print(f"✅ Saved tweet from {tweet['author']}")
+            return response.data
         else:
-            print(f"❌ Failed to save tweet from @{tweet['author']}")
-            
+            print(f"❌ Failed to save tweet from {tweet['author']}")
+            return None
     except Exception as e:
         print(f"❌ Error saving tweet: {str(e)}")
+        return None
 
 async def generate_ai_summary(tweets: List[Dict]) -> str:
     """Generate an AI summary of the tweets."""
@@ -95,10 +96,12 @@ async def generate_ai_summary(tweets: List[Dict]) -> str:
         tweet_text = "\n\n".join(formatted_tweets)
         
         # Generate summary using OpenAI
-        prompt = f"""You are a senior hedge fund analyst specializing in macroeconomic and crypto markets.
-Analyze the following tweets and extract the most relevant and insightful points. 
-Focus on high-signal, market-relevant commentary and cluster the output under the following headers:
+        prompt = f"""
+You are a senior hedge fund analyst at w3.wave, writing a daily intelligence briefing for internal portfolio managers.
 
+Your job is to analyze the following tweets from macroeconomic and crypto market experts and extract investment-relevant insights.
+
+📌 Structure your output under these headers:
 🧠 Macro  
 🏛️ Politics & Geopolitics  
 📊 Traditional Markets  
@@ -106,14 +109,14 @@ Focus on high-signal, market-relevant commentary and cluster the output under th
 🔄 Observed Shifts in Sentiment or Tone
 
 For each bullet point:
-- Summarize the key insight concisely and professionally.
-- Always include the Twitter handle and a **working tweet link** in Markdown format.
-- If multiple tweets contribute to one insight, include multiple links.
-- Never use placeholder text like [Link] — always extract and preserve the full tweet URL.
+- Capture the full context of the tweet — explain *what is being said*, *why it matters*, and *what the implication is*.
+- Do not summarize too briefly. Your job is to synthesize the full message for an investment audience, not just give headlines.
+- When multiple tweets from one author build on the same point, combine them into a single, well-rounded insight.
+- Always include the author handle and a full tweet link in Markdown format. Use multiple links if needed.
 
-Example format:
-- Asian investors are reportedly shifting from dollar assets to gold, suggesting risk-off positioning.  
-(Source: @FedGuy12 — [Link](https://twitter.com/FedGuy12/status/1234567890123456789))
+🎯 Focus on signal, not noise:
+- Extract actual market commentary, forecasts, emerging risks, sentiment signals, and macro/crypto links.
+- Omit memes, jokes, and overly vague takes.
 
 Here are the tweets to analyze:
 """
@@ -124,8 +127,11 @@ Here are the tweets to analyze:
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": tweet_text}
             ],
-            temperature=0.7,
-            max_tokens=1000
+            temperature=0.4,
+            top_p=0.9,
+            max_tokens=2000,
+            frequency_penalty=0.4,
+            presence_penalty=0.5
         )
         
         return response.choices[0].message.content.strip()
@@ -316,7 +322,7 @@ async def async_main():
         
         # Add a delay between users to avoid rate limits
         if i < len(users):
-            delay = 15  # 15 second delay between users
+            delay = 30  # Increased from 15 to 30 seconds
             print(f"⏳ Waiting {delay} seconds before next user...")
             await asyncio.sleep(delay)
     
