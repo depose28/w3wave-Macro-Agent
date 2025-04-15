@@ -244,23 +244,32 @@ def fetch_today_tweets_sync(usernames: List[str]) -> List[Dict]:
     """Synchronous wrapper for fetch_today_tweets."""
     return asyncio.run(fetch_today_tweets(usernames))
 
-def save_tweet_to_supabase(tweet_data):
-    """Save a tweet to the Supabase messages table."""
+async def save_tweet_to_supabase(tweet: Dict) -> Optional[Dict]:
+    """Save a tweet to the Supabase database."""
     try:
-        # Check if tweet already exists
-        if supabase.is_tweet_exists(tweet_data["author"], tweet_data["content"]):
-            print(f"⏭️ Tweet from {tweet_data['author']} already exists, skipping...")
+        # Create a unique identifier for the tweet using author and content
+        tweet_identifier = f"{tweet['author']}_{tweet['content'][:100]}"  # First 100 chars of content
+        
+        # Check if tweet already exists using the unique identifier
+        existing_tweet = supabase.client.table("messages")\
+            .select("id")\
+            .eq("author", tweet['author'])\
+            .eq("content", tweet['content'])\
+            .execute()
+            
+        if existing_tweet.data:
+            print(f"⏭️ Tweet from @{tweet['author']} already exists, skipping...")
             return None
 
         # Extract metrics from the tweet data
-        metrics = tweet_data.get('public_metrics', {})
+        metrics = tweet.get('public_metrics', {})
         
         # Prepare the data to insert with all required fields
         insert_data = {
-            "content": tweet_data.get("content", ""),
-            "author": tweet_data.get("author", ""),
-            "timestamp": tweet_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            "tweet_url": tweet_data.get("tweet_url", ""),
+            "content": tweet.get("content", ""),
+            "author": tweet.get("author", ""),
+            "timestamp": tweet.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            "tweet_url": tweet.get("tweet_url", ""),
             "like_count": metrics.get('like_count', 0),
             "retweet_count": metrics.get('retweet_count', 0),
             "reply_count": metrics.get('reply_count', 0),
@@ -268,23 +277,38 @@ def save_tweet_to_supabase(tweet_data):
             "summarized": False,
             "is_retweet": False,
             "topic": "macro",
-            "company": "macro",  # Adding company field back since it exists in schema
-            "source": "twitter",  # Adding source field back since it exists in schema
-            "private": False
+            "company": "macro",
+            "source": "twitter",
+            "private": False,
+            "tweet_identifier": tweet_identifier
         }
 
         # Save tweet to database
         response = supabase.client.table("messages").insert(insert_data).execute()
         
         if response.data:
-            print(f"✅ Saved tweet from {tweet_data['author']}")
+            print(f"✅ Saved tweet from @{tweet['author']}")
             return response.data
         else:
-            print(f"❌ Failed to save tweet from {tweet_data['author']}")
+            print(f"❌ Failed to save tweet from @{tweet['author']}")
             return None
+            
     except Exception as e:
-        print(f"❌ Error saving tweet from {tweet_data['author']}: {e}")
-        return None
+        # Handle specific error cases
+        if hasattr(e, 'code') and e.code == '23505':  # Unique constraint violation
+            print(f"⏭️ Tweet from @{tweet['author']} already exists in database")
+            return None
+        elif hasattr(e, 'code') and e.code == '42501':  # Permission denied
+            print(f"❌ Permission denied while saving tweet from @{tweet['author']}")
+            return None
+        elif hasattr(e, 'code') and e.code == '42P01':  # Table does not exist
+            print(f"❌ Database table 'messages' does not exist")
+            return None
+        else:
+            # For other errors, log the error type and message
+            error_type = type(e).__name__
+            print(f"❌ Error saving tweet from @{tweet['author']}: {error_type} - {str(e)}")
+            return None
 
 if __name__ == "__main__":
     print("🚀 Starting Twitter fetch for macro handles...")
