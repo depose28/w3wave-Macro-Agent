@@ -1,67 +1,108 @@
-# Macro Twitter Agent
+# Protocol Agent
 
-A Python application that fetches tweets from selected accounts, generates AI summaries, and sends daily email reports.
+A Python-based system that monitors macroeconomic and crypto market experts on Twitter, generates AI-powered summaries, and delivers daily intelligence reports via email.
 
-## Setup on Replit
+## Features
 
-1. Fork this repository to your GitHub account
-2. Create a new Replit project and import your forked repository
-3. Set up the required environment variables in Replit:
-   - Click on "Tools" in the left sidebar
-   - Select "Secrets"
-   - Add the following secrets:
-     - `TWITTER_BEARER_TOKEN`: Your Twitter API bearer token
-     - `SUPABASE_URL`: Your Supabase project URL
-     - `SUPABASE_SERVICE_ROLE_KEY`: Your Supabase service role key
-     - `OPENAI_API_KEY`: Your OpenAI API key
-     - `SENDER_API_KEY`: Your Resend API key
-     - `FROM_EMAIL`: The email address to send from
-     - `TO_EMAIL`: The email address to send to
-     - `MIN_ENGAGEMENT`: (Optional) Minimum engagement threshold for tweets (default: 50)
+- **Twitter Monitoring**: Tracks 12 key market experts for high-signal insights
+- **AI Analysis**: Uses GPT-4-turbo to generate structured market intelligence
+- **Email Delivery**: Sends formatted reports via Resend
+- **Data Storage**: Persists tweets and summaries in Supabase
 
-4. Install dependencies:
+## Twitter Handles Monitored
+
+The system tracks the following experts:
+- @fejau_inc
+- @DariusDale42
+- @CavanXy
+- @Citrini7
+- @FedGuy12
+- @fundstrat
+- @dgt10011
+- @Bluntz_Capital
+- @AriDavidPaul
+- @cburniske
+- @qthomp
+- @RaoulGMI
+
+## AI Summary Generation
+
+The system uses GPT-4-turbo to analyze tweets and generate structured summaries with the following sections:
+
+🧠 Macro  
+🏛️ Politics & Geopolitics  
+📊 Traditional Markets  
+💰 Crypto Markets  
+🔄 Observed Shifts in Sentiment or Tone
+
+Each insight includes:
+- Concise, professional summary
+- Twitter handle attribution
+- Direct link to source tweet
+- Multiple links when insights span multiple tweets
+
+## Email Flow
+
+Reports are delivered via Resend with:
+- Clean, monospace formatting
+- Structured sections with emoji headers
+- Direct links to source tweets
+- Timestamp of generation
+
+## Supabase Integration
+
+The system stores:
+- Raw tweets with metadata
+- Public metrics (likes, retweets, etc.)
+- Generated summaries
+- Processing status
+
+## Environment Variables
+
+Required environment variables:
+```
+# Twitter API
+TWITTER_BEARER_TOKEN=your_twitter_bearer_token
+
+# OpenAI
+OPENAI_API_KEY=your_openai_api_key
+
+# Resend
+RESEND_API_KEY=your_resend_api_key
+RESEND_FROM=your_from_email
+RESEND_TO=your_to_email
+
+# Supabase
+SUPABASE_URL=your_supabase_url
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+```
+
+## Setup
+
+1. Clone the repository
+2. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-
-5. Run the application:
+3. Create `.env` file with required variables
+4. Run the script:
    ```bash
    python main.py
    ```
 
-## Features
+## Database Schema
 
-- Fetches tweets from selected Twitter accounts
-- Generates AI summaries using OpenAI's GPT-4
-- Sends daily email reports with HTML and plain text versions
-- Tracks tweet engagement metrics
-- Prevents duplicate tweets in reports
-- Supports custom engagement thresholds
-
-## Configuration
-
-You can modify the following in `main.py`:
-
-- Twitter accounts to monitor (in the `users` list)
-- Minimum engagement threshold (in `filter_and_sort_tweets`)
-- Email formatting and styling
-- AI summary prompt and parameters
-
-## Development
-
-To run tests:
-```bash
-python -m pytest test_*.py
-```
-
-To reset today's summarized status (for testing):
-```bash
-python main.py --reset-summarized
-```
-
-## License
-
-MIT License
+The Supabase `messages` table includes:
+- content (text)
+- author (text)
+- timestamp (timestamp)
+- tweet_url (text)
+- company (text)
+- like_count (integer)
+- retweet_count (integer)
+- reply_count (integer)
+- quote_count (integer)
+- summarized (boolean)
 
 ## 🛰️ Protocol-Agent
 

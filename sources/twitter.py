@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 import tweepy
 from dotenv import load_dotenv
 import sys
+import asyncio
+from typing import List, Dict, Optional
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from helpers import is_today
 from supabase_client import SupabaseClient
@@ -25,131 +27,189 @@ print("🔑 Twitter Bearer Token:", BEARER_TOKEN[:10] + "..." + BEARER_TOKEN[-10
 client = tweepy.Client(bearer_token=BEARER_TOKEN)
 print("🤖 Twitter client initialized")
 
-def handle_rate_limit(attempt: int = 1):
-    """Handle rate limit with exponential backoff.
+# Rate limiter class
+class RateLimiter:
+    def __init__(self, max_requests: int, time_window: int):
+        self.max_requests = max_requests
+        self.time_window = time_window
+        self.requests = {}
+        self.last_request_time = 0
+        self.min_delay = 5.0  # Increased minimum delay between requests
+    
+    async def acquire(self, user_id: str = None):
+        now = time.time()
+        
+        # Ensure minimum delay between requests
+        if now - self.last_request_time < self.min_delay:
+            wait_time = self.min_delay - (now - self.last_request_time)
+            print(f"⏳ Waiting {wait_time:.1f} seconds before next request...")
+            await asyncio.sleep(wait_time)
+            return await self.acquire(user_id)
+        
+        # Initialize user's request history if not exists
+        if user_id not in self.requests:
+            self.requests[user_id] = []
+        
+        # Remove old requests
+        self.requests[user_id] = [req for req in self.requests[user_id] if now - req < self.time_window]
+        
+        # Check if user has exceeded their limit
+        if len(self.requests[user_id]) >= self.max_requests:
+            # Calculate wait time
+            wait_time = self.requests[user_id][0] + self.time_window - now
+            if wait_time > 0:
+                print(f"⏳ Rate limit reached for user {user_id}. Waiting {wait_time:.1f} seconds...")
+                await asyncio.sleep(wait_time)
+                return await self.acquire(user_id)
+        
+        self.requests[user_id].append(now)
+        self.last_request_time = now
+        return True
+
+# Global rate limiter (More conservative settings)
+rate_limiter = RateLimiter(max_requests=3, time_window=900)  # 3 requests per 15 minutes
+
+# Cache for user IDs
+user_id_cache = {}
+
+async def get_user_id(client, username: str) -> Optional[str]:
+    """Get user ID with caching."""
+    if username in user_id_cache:
+        return user_id_cache[username]
+    
+    await rate_limiter.acquire()
+    try:
+        user = client.get_user(username=username)
+        if user.data:
+            user_id_cache[username] = user.data.id
+            return user.data.id
+    except Exception as e:
+        print(f"❌ Error looking up user @{username}: {str(e)}")
+    return None
+
+async def fetch_tweets_for_user(username: str, client: tweepy.Client) -> List[Dict]:
+    """Fetch tweets for a specific user from the last 24 hours.
     
     Args:
-        attempt: The current attempt number (default: 1)
+        username: Twitter username to fetch tweets from
+        client: Initialized tweepy client
+        
+    Returns:
+        List of tweet dictionaries
     """
-    wait_time = min(900 * (1.5 ** (attempt - 1)), 3600)  # Max 1 hour wait
-    print(f"Rate limit hit. Waiting for {wait_time/60:.1f} minutes...")
-    time.sleep(wait_time)
-
-def fetch_tweets_for_user(client, username):
-    """Fetch tweets for a specific user."""
-    max_retries = 3
-    retry_count = 0
-    base_delay = 5  # Base delay between requests in seconds
-    
-    while retry_count < max_retries:
-        try:
-            print(f"\n🔍 Fetching tweets for user: {username} (Attempt {retry_count + 1}/{max_retries})")
-            
-            # Add increasing delay between requests
-            delay = base_delay * (retry_count + 1)
-            print(f"⏳ Waiting {delay} seconds before request...")
-            time.sleep(delay)
-            
-            # Get user ID from username
-            print(f"🔑 Looking up user ID for @{username}...")
-            user = client.get_user(username=username)
-            if not user.data:
-                print(f"❌ User @{username} not found")
-                return []
-            
-            print(f"✅ Found user ID: {user.data.id}")
-            
-            # Calculate time range (last 24 hours)
-            now = datetime.now(timezone.utc)
-            start_time = now - timedelta(hours=24)
-            start_time_str = start_time.strftime('%Y-%m-%dT%H:%M:%SZ')
-            
-            print(f"📅 Fetching tweets since: {start_time_str}")
-            print(f"⏰ Current time: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}")
-            
-            # Add delay between requests
-            time.sleep(base_delay)
-            
-            # Fetch user's tweets using their ID
-            print(f"📥 Fetching tweets for user ID {user.data.id}...")
-            tweets = client.get_users_tweets(
-                id=user.data.id,
-                start_time=start_time_str,
-                tweet_fields=["created_at", "id", "text", "referenced_tweets", "public_metrics"],
-                expansions=["referenced_tweets.id"],
-                max_results=10
-            )
-            
-            if not tweets.data:
-                print(f"ℹ️ No tweets found for @{username} in the last 24 hours")
-                return []
-            
-            print(f"✅ Found {len(tweets.data)} tweets for @{username}")
-            # Format tweets
-            formatted_tweets = []
-            for tweet in tweets.data:
-                # Check if this is a retweet
-                is_retweet = False
-                retweeted_username = None
-                if tweet.referenced_tweets:
-                    for ref in tweet.referenced_tweets:
-                        if ref.type == "retweeted":
-                            is_retweet = True
-                            # Get the retweeted tweet's author
-                            retweeted_tweet = next((t for t in tweets.includes.get('tweets', []) 
-                                                  if t.id == ref.id), None)
-                            if retweeted_tweet:
-                                retweeted_username = retweeted_tweet.author_id
-                            break
+    try:
+        # Get user ID
+        user = client.get_user(username=username)
+        if not user.data:
+            print(f"❌ User @{username} not found")
+            return []
+        
+        user_id = user.data.id
+        
+        # Calculate time range for last 24 hours
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(hours=24)
+        
+        # Try to fetch tweets with retry mechanism
+        max_retries = 5  # Increased retries but with shorter waits
+        retry_count = 0
+        base_wait_time = 60  # Start with 1 minute
+        
+        while retry_count < max_retries:
+            try:
+                # Fetch tweets excluding retweets and replies
+                tweets = client.get_users_tweets(
+                    id=user_id,
+                    start_time=start_time,
+                    end_time=end_time,
+                    exclude=["retweets", "replies"],
+                    tweet_fields=["created_at", "public_metrics", "entities"],
+                    max_results=100
+                )
                 
-                # Get engagement metrics
-                metrics = tweet.public_metrics if hasattr(tweet, 'public_metrics') else {}
+                if not tweets.data:
+                    print(f"ℹ️ No tweets found for @{username}")
+                    return []
                 
-                tweet_url = f"https://twitter.com/{username}/status/{tweet.id}"
-                formatted_tweets.append({
-                    "company": username,
-                    "author": username,
-                    "content": tweet.text,
-                    "timestamp": tweet.created_at.isoformat(),
-                    "source": "twitter",
-                    "tweet_url": tweet_url,
-                    "is_retweet": is_retweet,
-                    "retweeted_author": retweeted_username,
-                    "like_count": metrics.get('like_count', 0),
-                    "retweet_count": metrics.get('retweet_count', 0),
-                    "reply_count": metrics.get('reply_count', 0),
-                    "quote_count": metrics.get('quote_count', 0)
-                })
-                print(f"📝 Processed tweet: {tweet.id} (Retweet: {is_retweet})")
-                print(f"📊 Engagement: {metrics.get('like_count', 0)} likes, {metrics.get('retweet_count', 0)} retweets")
-            
-            return formatted_tweets
-            
-        except tweepy.TooManyRequests as e:
-            print(f"⚠️ Rate limit hit on attempt {retry_count + 1}")
-            print(f"⚠️ Rate limit error: {str(e)}")
-            
-            # Try to get rate limit info from the error
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"⚠️ Rate limit headers: {e.response.headers}")
-            
-            if retry_count < max_retries - 1:
-                wait_time = min(900 * (1.5 ** retry_count), 3600)  # Max 1 hour wait
-                print(f"⏳ Waiting {wait_time/60:.1f} minutes before retry...")
-                time.sleep(wait_time)
+                # Process tweets
+                processed_tweets = []
+                for tweet in tweets.data:
+                    processed_tweet = {
+                        "content": tweet.text,
+                        "author": username,
+                        "timestamp": tweet.created_at.isoformat(),
+                        "tweet_url": f"https://twitter.com/{username}/status/{tweet.id}",
+                        "public_metrics": tweet.public_metrics,
+                        "company": "macro"  # Default company value
+                    }
+                    processed_tweets.append(processed_tweet)
+                
+                print(f"✅ Found {len(processed_tweets)} tweets from @{username}")
+                return processed_tweets
+                
+            except tweepy.TooManyRequests as e:
                 retry_count += 1
-            else:
-                print(f"❌ Failed to fetch tweets for @{username} after {max_retries} attempts")
+                if retry_count < max_retries:
+                    # Exponential backoff: 1min, 2min, 4min, 8min, 16min
+                    wait_time = base_wait_time * (2 ** (retry_count - 1))
+                    print(f"⚠️ Rate limit hit for @{username}. Waiting {wait_time/60:.1f} minutes before retry {retry_count}/{max_retries}...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    print(f"❌ Max retries reached for @{username}. Skipping...")
+                    return []
+                    
+            except Exception as e:
+                print(f"❌ Error fetching tweets for @{username}: {str(e)}")
                 return []
-        except Exception as e:
-            print(f"❌ Error fetching tweets for @{username}: {str(e)}")
-            retry_count += 1
-            if retry_count < max_retries:
-                time.sleep(base_delay * retry_count)  # Exponential backoff for other errors
-            else:
-                return []
+        
+    except Exception as e:
+        print(f"❌ Error processing @{username}: {str(e)}")
+        return []
+
+async def fetch_today_tweets(usernames: List[str]) -> List[Dict]:
+    """Fetch today's tweets for multiple usernames sequentially."""
+    print("🚀 Starting Twitter fetch for macro handles...")
+    print(f"📊 Will fetch tweets from {len(usernames)} handles: {', '.join(usernames)}")
     
-    return []
+    # Initialize Twitter client
+    load_dotenv()
+    client = tweepy.Client(bearer_token=os.getenv('TWITTER_BEARER_TOKEN'))
+    
+    # Add initial delay to avoid rate limits
+    print("⏳ Adding initial delay to avoid rate limits...")
+    await asyncio.sleep(10)  # Reduced initial delay
+    
+    all_tweets = []
+    
+    # Process one user at a time with shorter delays
+    for i, username in enumerate(usernames):
+        print(f"\n📥 Processing user {i+1}/{len(usernames)}: @{username}")
+        
+        try:
+            # Add delay before processing each user
+            await asyncio.sleep(3)  # Reduced pre-user delay
+            
+            # Fetch tweets for this user
+            tweets = await fetch_tweets_for_user(username, client)
+            all_tweets.extend(tweets)
+            
+            # Add delay between users
+            if i < len(usernames) - 1:
+                delay = 15  # Reduced delay between users
+                print(f"⏳ Waiting {delay} seconds before next user...")
+                await asyncio.sleep(delay)
+        except Exception as e:
+            print(f"❌ Error processing user @{username}: {str(e)}")
+            print("⚠️ Continuing with next user...")
+            continue
+    
+    print(f"\n✅ Successfully fetched {len(all_tweets)} tweets")
+    return all_tweets
+
+# For backward compatibility
+def fetch_today_tweets_sync(usernames: List[str]) -> List[Dict]:
+    """Synchronous wrapper for fetch_today_tweets."""
+    return asyncio.run(fetch_today_tweets(usernames))
 
 def save_tweet_to_supabase(tweet_data):
     """Save a tweet to the Supabase messages table."""
@@ -159,8 +219,29 @@ def save_tweet_to_supabase(tweet_data):
             print(f"⏭️ Tweet from {tweet_data['author']} already exists, skipping...")
             return None
 
+        # Extract metrics from the tweet data
+        metrics = tweet_data.get('metrics', {})
+        
+        # Prepare the data to insert with all required fields
+        insert_data = {
+            "company": tweet_data.get("company", "macro"),  # Default to "macro" if not specified
+            "source": "twitter",
+            "content": tweet_data.get("content", ""),
+            "author": tweet_data.get("author", ""),
+            "timestamp": tweet_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            "tweet_url": tweet_data.get("tweet_url", ""),
+            "like_count": metrics.get('like_count', 0),
+            "retweet_count": metrics.get('retweet_count', 0),
+            "reply_count": metrics.get('reply_count', 0),
+            "quote_count": metrics.get('quote_count', 0),
+            "summarized": False,
+            "is_retweet": False,  # Default to false
+            "private": False,  # Default to false
+            "topic": "macro"  # Default topic
+        }
+
         # Save tweet to database
-        response = supabase.client.table("messages").insert(tweet_data).execute()
+        response = supabase.client.table("messages").insert(insert_data).execute()
         
         if response.data:
             print(f"✅ Saved tweet from {tweet_data['author']}")
@@ -171,35 +252,6 @@ def save_tweet_to_supabase(tweet_data):
     except Exception as e:
         print(f"❌ Error saving tweet from {tweet_data['author']}: {e}")
         return None
-
-def fetch_today_tweets(usernames):
-    """Fetch today's tweets for a list of usernames."""
-    print("🚀 Starting Twitter fetch for macro handles...")
-    print(f"📊 Will fetch tweets from {len(usernames)} handles: {', '.join(usernames)}")
-    
-    # Calculate today's midnight in CET
-    now = datetime.now(timezone.utc)
-    cet_offset = timedelta(hours=1)  # CET is UTC+1
-    cet_time = now + cet_offset
-    start_time = datetime(cet_time.year, cet_time.month, cet_time.day, 0, 0, 0, tzinfo=timezone.utc) - cet_offset
-    print(f"📅 Fetching tweets since: {start_time.isoformat()} (CET midnight)")
-    
-    all_tweets = []
-    for username in usernames:
-        tweets = fetch_tweets_for_user(client, username)
-        for tweet in tweets:
-            # Save tweet to Supabase
-            save_tweet_to_supabase(tweet)
-        all_tweets.extend(tweets)
-    
-    print(f"\n✅ Successfully fetched {len(all_tweets)} tweets:")
-    for tweet in all_tweets:
-        print(f"\n@{tweet['author']}:")
-        print(f"📝 {tweet['content']}")
-        print(f"⏰ {tweet['timestamp']}")
-        print(f"🔗 {tweet['tweet_url']}")
-    
-    return all_tweets
 
 # List of macro-focused Twitter handles to track
 MACRO_HANDLES = [
@@ -216,6 +268,24 @@ MACRO_HANDLES = [
     "AriDavidPaul",
     "cburniske"
 ]
+
+def initialize_twitter_client():
+    """Initialize the Twitter client with bearer token."""
+    try:
+        # Set Twitter bearer token from environment
+        bearer_token = os.getenv('TWITTER_BEARER_TOKEN')
+        if not bearer_token:
+            print("❌ TWITTER_BEARER_TOKEN not found in environment variables")
+            return None
+            
+        # Initialize Twitter client
+        client = tweepy.Client(bearer_token=bearer_token)
+        print("✅ Twitter client initialized")
+        return client
+        
+    except Exception as e:
+        print(f"❌ Error initializing Twitter client: {str(e)}")
+        return None
 
 if __name__ == "__main__":
     print("🚀 Starting Twitter fetch for macro handles...")

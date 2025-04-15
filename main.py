@@ -4,17 +4,30 @@ import warnings
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from supabase_client import SupabaseClient
-from sources.twitter import fetch_today_tweets
+from sources.twitter import fetch_today_tweets, MACRO_HANDLES, fetch_tweets_for_user, initialize_twitter_client
 import resend
 from openai import OpenAI
 import re
 import tweepy
 import time
+import asyncio
+import sys
+from typing import List, Dict, Any
+import openai
 
 # Filter out all syntax warnings from tweepy
 warnings.filterwarnings("ignore", category=SyntaxWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Load environment variables
+load_dotenv()
+
+# Initialize OpenAI client
+client = OpenAI()
+
+# Initialize Supabase client
+supabase = SupabaseClient()
 
 # ------------------🔧 Helper Functions ------------------
 
@@ -30,240 +43,149 @@ def save_seen_tweets(cache):
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
 
-def save_tweet_to_supabase(supabase_client, tweet_data):
-    """Save a tweet to the Supabase messages table.
-    
-    Args:
-        supabase_client: SupabaseClient instance
-        tweet_data: dict containing tweet data with the following keys:
-            - company: text (company/user identifier)
-            - source: text (always "twitter")
-            - content: text (tweet content)
-            - author: text (tweet author)
-            - timestamp: timestamp with time zone (tweet creation time)
-    
-    Returns:
-        dict: Response data from Supabase if successful
-        None: If there was an error saving the tweet or if tweet already exists
-    """
+async def save_tweet_to_supabase(tweet: Dict) -> None:
+    """Save a tweet to Supabase."""
     try:
-        # Check if tweet already exists
-        if supabase_client.is_tweet_exists(tweet_data["author"], tweet_data["content"]):
-            print(f"⏭️ Tweet from {tweet_data['author']} already exists, skipping...")
-            return None
-
-        # created_at will be set automatically by Supabase
-        response = supabase_client.client.table("messages").insert(tweet_data).execute()
+        # Flatten public metrics into individual columns
+        tweet_data = {
+            "content": tweet["content"],
+            "author": tweet["author"],
+            "timestamp": tweet["timestamp"],
+            "tweet_url": tweet["tweet_url"],
+            "company": tweet["company"],
+            "like_count": tweet["public_metrics"].get("like_count", 0),
+            "retweet_count": tweet["public_metrics"].get("retweet_count", 0),
+            "reply_count": tweet["public_metrics"].get("reply_count", 0),
+            "quote_count": tweet["public_metrics"].get("quote_count", 0)
+        }
         
-        if response.data:
-            print(f"✅ Saved tweet from {tweet_data['author']}")
-            return response.data[0]  # Return the first (and only) inserted record
+        # Check if tweet already exists
+        existing_tweet = supabase.client.table("messages")\
+            .select("id")\
+            .eq("tweet_url", tweet_data["tweet_url"])\
+            .execute()
+            
+        if existing_tweet.data:
+            print(f"⏭️ Tweet from @{tweet['author']} already exists, skipping...")
+            return
+            
+        # Insert new tweet
+        result = supabase.client.table("messages")\
+            .insert(tweet_data)\
+            .execute()
+            
+        if result.data:
+            print(f"✅ Successfully saved tweet from @{tweet['author']}")
         else:
-            print(f"❌ No data returned when saving tweet from {tweet_data['author']}")
-            return None
+            print(f"❌ Failed to save tweet from @{tweet['author']}")
             
     except Exception as e:
         print(f"❌ Error saving tweet: {str(e)}")
-        return None
 
-def generate_ai_summary(tweets: list) -> str:
-    """Generate an AI summary of the tweets using OpenAI.
-    
-    Args:
-        tweets: List of tweet dictionaries
-    
-    Returns:
-        str: AI-generated summary
-    """
-    if not tweets:
-        return "No tweets to summarize today."
-    
+async def generate_ai_summary(tweets: List[Dict]) -> str:
+    """Generate an AI summary of the tweets."""
     try:
-        # Format tweets with engagement metrics and URLs
-        formatted_tweets = "\n".join([
-            f"@{tweet['author']} ({tweet['total_engagement']} engagement): {tweet['content']}\nURL: {tweet.get('tweet_url', 'N/A')}"
-            for tweet in tweets
-        ])
+        # Format tweets for summary
+        formatted_tweets = []
+        for tweet in tweets:
+            formatted_tweet = f"@{tweet['author']}: {tweet['content']} [Link]({tweet['tweet_url']})"
+            formatted_tweets.append(formatted_tweet)
         
-        # Initialize OpenAI client
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        # Join tweets with newlines
+        tweet_text = "\n\n".join(formatted_tweets)
         
-        # Generate summary
+        # Generate summary using OpenAI
+        prompt = f"""You are a senior hedge fund analyst specializing in macroeconomic and crypto markets.
+Analyze the following tweets and extract the most relevant and insightful points. 
+Focus on high-signal, market-relevant commentary and cluster the output under the following headers:
+
+🧠 Macro  
+🏛️ Politics & Geopolitics  
+📊 Traditional Markets  
+💰 Crypto Markets  
+🔄 Observed Shifts in Sentiment or Tone
+
+For each bullet point:
+- Summarize the key insight concisely and professionally.
+- Always include the Twitter handle and a **working tweet link** in Markdown format.
+- If multiple tweets contribute to one insight, include multiple links.
+- Never use placeholder text like [Link] — always extract and preserve the full tweet URL.
+
+Example format:
+- Asian investors are reportedly shifting from dollar assets to gold, suggesting risk-off positioning.  
+(Source: @FedGuy12 — [Link](https://twitter.com/FedGuy12/status/1234567890123456789))
+
+Here are the tweets to analyze:
+"""
+        
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4-turbo-preview",
             messages=[
-                {
-                    "role": "system",
-                    "content": """
-You are a senior macro & crypto analyst at a hedge fund. You analyze market commentary from high-signal Twitter accounts to extract daily insights. Your output will be read by PMs and CIOs.
-
-Your job is NOT to summarize tweets — it's to interpret and cluster them into evolving market narratives.
-
-## Guidelines:
-- Group tweets by shared themes or developing narratives (e.g. "Dollar Liquidity Pressure", "Risk-On Signals", "Institutional Flow", "Crypto Beta Rotation").
-- Use institutional tone: informative, confident, concise. No fluff.
-- If multiple tweets discuss the same theme, synthesize the core insight and attribute key quotes.
-- Extract market sentiment (bullish/bearish/neutral) and tone (e.g. urgent, cautious, euphoric) where relevant.
-- Tag tweet function with emojis: 🧠 Insight, 📊 Data/Chart, 🔮 Forecast, 🎙️ Commentary, 🚨 News Reaction
-- Flag contrarian takes or sentiment shifts (e.g. "This poster was previously bearish and now flipping bullish").
-- Only include content with market relevance. Discard jokes, memes, off-topic banter.
-
-## Output Structure:
-🧠 Macro
-- Key insights and implications
-- Source tweets with URLs directly under each insight they support
-
-🌍 Politics & Geopolitics
-- Key insights and implications
-- Source tweets with URLs directly under each insight they support
-
-📉 Traditional Markets
-- Key insights and implications
-- Source tweets with URLs directly under each insight they support
-
-🪙 Crypto Markets
-- Key insights and implications
-- Source tweets with URLs directly under each insight they support
-
-🔍 Observed Shifts in Sentiment or Tone
-- Notable changes in market sentiment
-- Contrarian views and their rationale
-- Source tweets with URLs for sentiment evidence
-
-Be sharp. Think like you're prepping a morning call for an investment committee.
-"""
-                },
-                {
-                    "role": "user",
-                    "content": f"""
-Below are today's tweets from our tracked accounts, with engagement metrics and source URLs.
-
-Please analyze them according to the guidelines and structure above. Focus on extracting actionable insights and evolving narratives.
-
-For each insight or point you make, include the relevant tweet URL directly underneath it, formatted as:
-Source: @author - URL
-
-Tweets:
-{formatted_tweets}
-
-Remember to:
-1. Group by themes/narratives
-2. Tag insights with appropriate emojis
-3. Note any sentiment shifts
-4. Include source URLs under each point they support
-"""
-                }
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": tweet_text}
             ],
-            temperature=0.7,  # Slightly higher temperature for more narrative synthesis
-            max_tokens=2000   # Increased token limit for more detailed analysis
+            temperature=0.7,
+            max_tokens=1000
         )
         
         return response.choices[0].message.content.strip()
-    
-    except Exception as e:
-        print(f"❌ Error generating AI summary: {e}")
-        return "Error generating summary."
-
-def format_email_html(summary_text: str) -> str:
-    # Convert markdown bold (if any) to <strong>
-    summary_text = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", summary_text)
-
-    # Format section headers like "🧠 Macro" into <h2>
-    headers = [
-        "🧠 Macro",
-        "🌍 Politics & Geopolitics",
-        "📉 Traditional Markets",
-        "🪙 Crypto Markets",
-        "🔍 Observed Shifts in Sentiment or Tone"
-    ]
-    for header in headers:
-        summary_text = summary_text.replace(
-            header, f'<h2 style="font-size: 16px; margin: 24px 0 12px;">{header}</h2>'
-        )
-
-    # Format numbered bullet points into <p>
-    summary_text = re.sub(
-        r"^\d+\.\s(.+?)(?=\n|$)", 
-        r'<p style="margin: 0 0 10px;">• \1</p>', 
-        summary_text, 
-        flags=re.MULTILINE
-    )
-
-    # Format "Source: @user - https://..." lines into links
-    summary_text = re.sub(
-        r"(Source[s]?:\s*@[\w]+)\s*-\s*(https://twitter\.com/\S+)",
-        r'<p style="margin: 0 0 16px;"><em>\1</em> – <a href="\2" target="_blank">View Tweet</a></p>',
-        summary_text
-    )
-
-    # Replace double newlines (if any remain) with break
-    summary_text = summary_text.replace("\n\n", "<br><br>")
-
-    # Remove leftover single newlines
-    summary_text = summary_text.replace("\n", " ")
-
-    # Wrap it in a basic HTML body
-    return f"""
-    <html>
-      <body style="font-family: Arial, sans-serif; font-size: 14px; color: #333; line-height: 1.6;">
-        <h1 style="font-size: 18px; margin-bottom: 20px;">📬 Daily Social Media Summary Report</h1>
-        {summary_text}
-        <hr style="border: none; border-top: 1px solid #ccc; margin: 32px 0;">
-        <p style="font-size: 12px; color: #999;">Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-      </body>
-    </html>
-    """
-
-def send_email_report(summary: str, tweets: list) -> bool:
-    """Send the daily report via Resend.com.
-    
-    Args:
-        summary: The AI-generated summary
-        tweets: List of tweet dictionaries
-    
-    Returns:
-        bool: True if email was sent successfully, False otherwise
-    """
-    try:
-        # Configure Resend with credentials from .env
-        resend.api_key = os.getenv("SENDER_API_KEY")
         
-        # Get email addresses
-        from_email = os.getenv("FROM_EMAIL")
-        to_email = os.getenv("TO_EMAIL")
+    except Exception as e:
+        print(f"❌ Error generating summary: {str(e)}")
+        return ""
+
+async def send_email_report(summary: str) -> None:
+    """Send the email report using Resend."""
+    try:
+        # Format email content
+        email_content = format_email_html(summary)
+        
+        # Configure Resend
+        resend.api_key = os.getenv("RESEND_API_KEY")
+        if not resend.api_key:
+            raise ValueError("RESEND_API_KEY not found in environment variables")
+            
+        # Get email configuration
+        from_email = os.getenv("RESEND_FROM", "onboarding@resend.dev")
+        to_email = os.getenv("RESEND_TO", "philippbeer86@gmail.com")
         
         if not from_email or not to_email:
-            print("❌ Email addresses not configured")
-            return False
+            raise ValueError("Email configuration missing. Please set RESEND_FROM and RESEND_TO in .env")
         
-        # Format the email content with HTML
-        html_content = format_email_html(summary)
-        
-        # Create plain text version
-        plain_text = f"""
-Daily w3.wave Macro Update
-=========================
-
-{summary}
-
-Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-        
-        # Send email using Resend with both HTML and plain text
+        # Send email using Resend
         response = resend.Emails.send({
             "from": from_email,
             "to": to_email,
-            "subject": "Daily w3.wave Macro Update",
-            "html": html_content,
-            "text": plain_text
+            "subject": f"Daily Macro Report - {datetime.now().strftime('%Y-%m-%d')}",
+            "html": email_content
         })
         
-        print("✅ Email report sent successfully")
-        return True
-        
+        if response:
+            print("✅ Email report sent successfully")
+        else:
+            print("❌ Failed to send email report")
+            
     except Exception as e:
-        print(f"❌ Error sending email: {e}")
-        return False
+        print(f"❌ Error sending email: {str(e)}")
+
+def format_email_html(summary_text: str) -> str:
+    """Format the AI summary in a super clean plain text style HTML email."""
+    return f"""
+    <html>
+      <body style="font-family: monospace; font-size: 14px; color: #000; line-height: 1.6;">
+        <pre style="white-space: pre-wrap;">
+📬 Daily Macro & Crypto Intelligence Report
+==========================================
+
+{summary_text}
+
+==========================================
+
+Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        </pre>
+      </body>
+    </html>
+    """
 
 def filter_and_sort_tweets(tweets: list, min_engagement: int = 0) -> list:
     """Filter and sort tweets by engagement metrics.
@@ -296,21 +218,67 @@ def filter_and_sort_tweets(tweets: list, min_engagement: int = 0) -> list:
     
     return filtered_tweets
 
+def generate_summary_with_openai(prompt: str) -> str:
+    """Generate a summary using OpenAI's API.
+    
+    Args:
+        prompt: The prompt to send to OpenAI
+        
+    Returns:
+        str: The generated summary
+    """
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are an expert macro analyst who excels at identifying key trends and insights from social media updates. You write clear, concise, and insightful summaries."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"❌ Error generating summary with OpenAI: {str(e)}")
+        return "Error generating summary with OpenAI."
+
+def is_meaningful_tweet(tweet: str) -> bool:
+    """Check if a tweet is meaningful (not a reply or @mention).
+    
+    Args:
+        tweet: The tweet text to check
+        
+    Returns:
+        bool: True if the tweet is meaningful, False if it's a reply or @mention
+    """
+    # Remove any leading/trailing whitespace
+    tweet = tweet.strip()
+    
+    # Return False if tweet starts with @ (reply or mention)
+    if tweet.startswith('@'):
+        return False
+        
+    return True
+
+def filter_meaningful_tweets(tweets: List[Dict]) -> List[Dict]:
+    """Filter out non-meaningful tweets (replies and @mentions).
+    
+    Args:
+        tweets: List of tweet dictionaries
+        
+    Returns:
+        List of filtered tweet dictionaries
+    """
+    return [tweet for tweet in tweets if is_meaningful_tweet(tweet['content'])]
+
 # ------------------📦 Main Execution ------------------
 
-def main():
-    print("\n🚀 Starting daily macro report generation...")
-    print("📅 Date:", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
+async def async_main():
+    """Main async function to orchestrate the daily report generation."""
+    print("🧠 Starting daily report generation...")
     
-    # Initialize clients
-    print("\n🔌 Initializing clients...")
-    supabase = SupabaseClient()
-    print("✅ Supabase client initialized")
-    
-    # Define Twitter usernames to monitor
-    twitter_usernames = [
-        "qthomp",
-        "RaoulGMI",
+    # List of users to monitor
+    users = [
         "fejau_inc",
         "DariusDale42",
         "CavanXy",
@@ -320,44 +288,64 @@ def main():
         "dgt10011",
         "Bluntz_Capital",
         "AriDavidPaul",
-        "cburniske"
+        "cburniske",
+        "qthomp",
+        "RaoulGMI"
     ]
     
-    # Fetch today's tweets
-    print("\n📥 Fetching today's tweets...")
-    tweets = fetch_today_tweets(twitter_usernames)
-    print(f"✅ Fetched {len(tweets)} tweets")
+    print(f"📊 Will monitor {len(users)} Twitter handles")
     
-    # Save tweets to database
+    # Initialize Twitter client
+    twitter_client = initialize_twitter_client()
+    if not twitter_client:
+        print("❌ Failed to initialize Twitter client")
+        return
+    
+    print("\n📥 Fetching new tweets from Twitter...")
+    
+    # Fetch tweets for each user
+    all_tweets = []
+    for i, username in enumerate(users, 1):
+        print(f"\n🔍 Processing user {i}/{len(users)}: @{username}")
+        tweets = await fetch_tweets_for_user(username, twitter_client)
+        if tweets:
+            print(f"✅ Found {len(tweets)} tweets from @{username}")
+            all_tweets.extend(tweets)
+        else:
+            print(f"ℹ️ No tweets found for @{username}")
+        
+        # Add a delay between users to avoid rate limits
+        if i < len(users):
+            delay = 15  # 15 second delay between users
+            print(f"⏳ Waiting {delay} seconds before next user...")
+            await asyncio.sleep(delay)
+    
+    if not all_tweets:
+        print("\n❌ No tweets found for any user")
+        return
+    
+    print(f"\n📊 Total tweets collected: {len(all_tweets)}")
+    
+    # Save tweets to Supabase
     print("\n💾 Saving tweets to database...")
-    saved_tweets = []
-    for tweet in tweets:
-        result = save_tweet_to_supabase(supabase, tweet)
-        if result:
-            saved_tweets.append(result)
-    print(f"✅ Saved {len(saved_tweets)} new tweets")
+    for tweet in all_tweets:
+        try:
+            await save_tweet_to_supabase(tweet)
+        except Exception as e:
+            print(f"❌ Error saving tweet: {str(e)}")
     
-    # Get tweets from database
-    print("\n📥 Retrieving tweets from database...")
-    db_tweets = get_tweets_from_db(supabase)
-    print(f"✅ Retrieved {len(db_tweets)} tweets from database")
+    print("\n📝 Generating AI summary...")
+    summary = await generate_ai_summary(all_tweets)
     
-    # Generate summaries
-    print("\n🤖 Generating summaries...")
-    summaries = generate_summaries(db_tweets)
-    print(f"✅ Generated {len(summaries)} summaries")
+    print("\n📧 Sending email report...")
+    await send_email_report(summary)
     
-    # Format email
-    print("\n📧 Formatting email...")
-    html_content, plain_text_content = format_email(summaries)
-    print("✅ Email content formatted")
-    
-    # Send email
-    print("\n📤 Sending email...")
-    send_email(html_content, plain_text_content)
-    print("✅ Email sent successfully!")
-    
-    print("\n✨ Daily macro report generation completed successfully!")
+    print("\n✅ Daily report generation completed!")
+
+def main():
+    """Main function to run the script."""
+    print("Script is starting execution...")
+    asyncio.run(async_main())
 
 def generate_and_send_report():
     """Generate AI summary and send email report for today's tweets."""
@@ -367,21 +355,8 @@ def generate_and_send_report():
     # Initialize clients
     supabase = SupabaseClient()
     
-    # Configure users to monitor
-    users = [
-        "qthomp",
-        "RaoulGMI",
-        "fejau_inc",
-        "DariusDale42",
-        "CavanXy",
-        "Citrini7",
-        "FedGuy12",
-        "fundstrat",
-        "dgt10011",
-        "Bluntz_Capital",
-        "AriDavidPaul",
-        "cburniske"
-    ]
+    # Import the list of handles to monitor
+    users = MACRO_HANDLES
     
     print("🧠 Starting daily report generation...")
     print(f"📊 Will monitor {len(users)} Twitter handles")
@@ -428,7 +403,7 @@ def generate_and_send_report():
         print("✅ No tweets to analyze today.")
         return
     
-    print(f"📊 Found {len(tweets_to_process)} tweets to analyze")
+    print(f" Found {len(tweets_to_process)} tweets to analyze")
     
     # Step 3: Filter and sort tweets by engagement
     print("\n📊 Filtering and sorting tweets by engagement...")
@@ -442,49 +417,16 @@ def generate_and_send_report():
     print("\n🤖 Generating AI summary...")
     summary = generate_ai_summary(tweets_to_process)
     
-    # Step 5: Store AI report in database
-    print("\n💾 Storing AI report in database...")
-    # Get the Supabase IDs of the tweets we just saved
-    tweet_ids = []
-    for tweet in tweets_to_process:
-        # Try to get the ID from the saved tweet data
-        if 'saved_data' in tweet and tweet['saved_data'] and 'id' in tweet['saved_data']:
-            tweet_ids.append(tweet['saved_data']['id'])
-            print(f"✅ Found ID for tweet from @{tweet['author']}: {tweet['saved_data']['id']}")
-        else:
-            print(f"⚠️ Warning: Could not find ID for tweet from @{tweet['author']}")
-    
-    report_data = {
-        "summary": summary,
-        "tweet_ids": tweet_ids,
-        "date": today.isoformat(),
-        "email_sent": False
-    }
-    stored_report = supabase.store_ai_report(report_data)
-    if stored_report:
-        print("✅ Successfully stored AI report")
-    else:
-        print("❌ Failed to store AI report")
-        return
-    
-    # Step 6: Send email report
+    # Step 5: Send email report
     print("\n📧 Sending email report...")
-    if send_email_report(summary, tweets_to_process):
-        # Step 7: Mark tweets as summarized after successful email delivery
-        tweet_ids = [tweet['id'] for tweet in tweets_to_process]
-        if supabase.mark_tweets_as_summarized(tweet_ids):
-            print(f"✅ Successfully marked {len(tweet_ids)} tweets as summarized")
-            
-            # Update report to indicate email was sent
-            supabase.client.table("ai_reports")\
-                .update({"email_sent": True})\
-                .eq("id", stored_report["id"])\
-                .execute()
-            print("✅ Updated report status to email sent")
-        else:
-            print("❌ Failed to mark tweets as summarized")
+    asyncio.run(send_email_report(summary))
+    
+    # Step 6: Mark tweets as summarized after successful email delivery
+    tweet_ids = [tweet['id'] for tweet in tweets_to_process]
+    if supabase.mark_tweets_as_summarized(tweet_ids):
+        print(f"✅ Successfully marked {len(tweet_ids)} tweets as summarized")
     else:
-        print("❌ Failed to send email report")
+        print("❌ Failed to mark tweets as summarized")
 
 def reset_today_summarized_status():
     """Reset the summarized status of today's tweets to False."""
@@ -582,10 +524,4 @@ def test_twitter_api():
         return False
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"\n❌ Error in main execution: {str(e)}")
-        print("Stack trace:")
-        import traceback
-        traceback.print_exc()
+    main()

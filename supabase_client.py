@@ -20,53 +20,47 @@ class SupabaseClient:
             # Remove @ symbol if present in author name
             author = tweet_data["author"].replace("@", "") if tweet_data["author"].startswith("@") else tweet_data["author"]
             
-            response = self.client.table("messages").insert({
+            # Extract metrics from the tweet data
+            metrics = tweet_data.get("metrics", {})
+            
+            # Prepare the data to insert
+            insert_data = {
                 "company": tweet_data["company"],  # Project/protocol identifier
                 "author": author,
                 "content": tweet_data["content"],
                 "timestamp": tweet_data["timestamp"],
                 "source": "twitter",
                 "tweet_url": tweet_data.get("tweet_url", ""),
-                "like_count": tweet_data.get("like_count", 0),
-                "retweet_count": tweet_data.get("retweet_count", 0),
-                "reply_count": tweet_data.get("reply_count", 0),
-                "quote_count": tweet_data.get("quote_count", 0)
-            }).execute()
-            return response.data
+                "like_count": metrics.get("like_count", 0),
+                "retweet_count": metrics.get("retweet_count", 0),
+                "reply_count": metrics.get("reply_count", 0),
+                "quote_count": metrics.get("quote_count", 0),
+                "summarized": False  # Default to not summarized
+            }
+            
+            # Insert the tweet into the database
+            response = self.client.table("messages").insert(insert_data).execute()
+            
+            if response.data:
+                print(f"✅ Successfully saved tweet from @{author}")
+                return response.data[0]
+            else:
+                print(f"❌ No data returned when saving tweet from @{author}")
+                return None
+            
         except Exception as e:
-            print(f"Error storing tweet: {e}")
+            print(f"❌ Error saving tweet: {str(e)}")
+            print(f"🔍 Debug info: {e.__class__.__name__}")
             return None
 
-    def get_tweets_by_date(self, date: datetime = None, company: str = None) -> list:
-        """Get tweets from a specific date.
-        
-        Args:
-            date: datetime object for the date to fetch tweets from
-            company: optional company filter
-        
-        Returns:
-            List of tweet dictionaries
-        """
+    def get_tweets_by_date(self, date: datetime) -> List[Dict]:
+        """Get tweets for a specific date."""
         try:
-            # Build the query
-            query = self.client.table("messages").select("*")
-            
-            # Add date filter
-            if date:
-                next_day = date + timedelta(days=1)
-                query = query.gte("timestamp", date.isoformat()).lt("timestamp", next_day.isoformat())
-            
-            # Add company filter if provided
-            if company:
-                query = query.eq("company", company)
-            
-            # Only get non-summarized tweets
-            query = query.eq("summarized", False)
-            
-            # Execute query
-            response = query.execute()
+            response = self.client.table("messages")\
+                .select("*")\
+                .eq("date", date.date().isoformat())\
+                .execute()
             return response.data
-            
         except Exception as e:
             print(f"Error fetching tweets: {e}")
             return []
@@ -238,4 +232,30 @@ class SupabaseClient:
             return response.data[0] if response.data else None
         except Exception as e:
             print(f"Error fetching AI report: {e}")
-            return None 
+            return None
+
+    def get_today_tweets(self) -> List[Dict]:
+        """Get all tweets from today from the database."""
+        try:
+            # Get today's date range in UTC
+            now = datetime.now(timezone.utc)
+            start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+            
+            # Query the database for today's tweets using timestamp
+            response = self.client.table("messages") \
+                .select("*") \
+                .gte("timestamp", start_of_day.isoformat()) \
+                .lte("timestamp", end_of_day.isoformat()) \
+                .execute()
+            
+            if response.data:
+                print(f"✅ Found {len(response.data)} tweets for today")
+                return response.data
+            else:
+                print("ℹ️ No tweets found for today")
+                return []
+            
+        except Exception as e:
+            print(f"❌ Error retrieving tweets from database: {str(e)}")
+            return [] 
